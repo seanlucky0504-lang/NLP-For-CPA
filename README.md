@@ -31,6 +31,8 @@ This project sketches a lightweight multi-agent pipeline for generating CPA exam
    python -m src.teacher.pipeline --topic "财务成本管理" --num-questions 10
    ```
 
+   The CLI now prints per-sample progress with ETA hints so you can estimate how long larger runs (e.g., 200–500 samples) will take. With online DeepSeek access, expect roughly 1–3 samples per second depending on latency; offline fallback runs are near-instant but produce placeholder text.
+
 4. Fine-tune the student model with LoRA (example uses Qwen1.5-1.8B-Chat):
 
    ```bash
@@ -47,4 +49,5 @@ This project sketches a lightweight multi-agent pipeline for generating CPA exam
 
 - The teacher side relies on LangChain; replace the DeepSeek chat wrapper with any compatible OpenAI-style backend.
 - The sample dataset is tiny and only for smoke tests; for real experiments, enlarge via the pipeline and add held-out evaluation splits.
+- The student fine-tuning script now applies causal-LM padding via `DataCollatorForLanguageModeling` so variable-length samples batch correctly.
 - Evaluation scaffolding provides BLEU/BERTScore hooks and human-rating placeholders; plug in your metrics of choice.

@@ -1,7 +1,8 @@
 import json
 import os
+import time
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
@@ -90,11 +91,11 @@ class WriterAgent:
             [
                 (
                     "system",
-                    "你是 CPA 讲解老师，根据大纲要点生成问答题（中文），并附标准答案。",
+                    "你是 CPA 讲解老师，根据大纲要点生成问答题（中文），并附标准答案，确保不同变体的提问方式各有侧重。",
                 ),
                 (
                     "human",
-                    "科目: {topic}\n要点: {bullets}\n难度: {difficulty}\n请输出问题和标准答案。",
+                    "科目: {topic}\n要点: {bullets}\n难度: {difficulty}\n变体序号: {variant}\n请输出问题和标准答案，避免与同主题已有题目重复。",
                 ),
             ]
         )
@@ -126,9 +127,14 @@ class WriterAgent:
             return _fallback_response(rendered, "TeachingNote")
         return self.client.invoke(rendered).content.strip()
 
-    def generate_qa(self, topic: str, bullets: Sequence[str], difficulty: str) -> tuple[str, str]:
+    def generate_qa(
+        self, topic: str, bullets: Sequence[str], difficulty: str, variant: int = 1
+    ) -> tuple[str, str]:
         rendered = self.qa_prompt.format(
-            topic=topic, bullets="; ".join(bullets), difficulty=difficulty
+            topic=topic,
+            bullets="; ".join(bullets),
+            difficulty=difficulty,
+            variant=variant,
         )
         if not self.client:
             placeholder = _fallback_response(rendered, "QA")
@@ -190,37 +196,74 @@ class DatasetSynthesizer:
         topic: str,
         num_questions: int = 5,
         difficulties: Sequence[str] | None = None,
+        progress_callback: Callable[[Dict], None] | None = None,
     ) -> List[QAItem]:
+        start_ts = time.perf_counter()
+
+        def emit(stage: str, **payload: Dict) -> None:
+            if progress_callback:
+                progress_callback({"stage": stage, **payload})
+
         outline = self.planner.plan(topic)
+        emit("outline", count=len(outline))
+
         difficulties = list(difficulties or ["easy", "medium", "hard"])
-        dataset: list[QAItem] = []
-        idx = 1
+
+        # Gather all outline bullets to allow round-robin generation even if
+        # the outline is short, preventing early termination when num_questions
+        # is large (e.g., 200+).
+        expanded_outline: list[tuple[str, str, str]] = []  # (section, note, bullet)
         for node in outline:
-            note = self.writer.generate_note(node.section, node.bullet_points)
-            for bullet in node.bullet_points:
-                if idx > num_questions:
-                    break
-                question, answer = self.writer.generate_qa(
-                    topic=node.section,
-                    bullets=[bullet],
-                    difficulty=difficulties[(idx - 1) % len(difficulties)],
+            bullets = node.bullet_points or [node.section]
+            note = self.writer.generate_note(node.section, bullets)
+            for bullet in bullets:
+                expanded_outline.append((node.section, note, bullet))
+
+        if not expanded_outline:
+            expanded_outline.append((topic, self.writer.generate_note(topic, [topic]), topic))
+
+        emit("prep", slots=len(expanded_outline))
+
+        dataset: list[QAItem] = []
+        total_slots = len(expanded_outline)
+        while len(dataset) < num_questions:
+            section, note, bullet = expanded_outline[len(dataset) % total_slots]
+            variant = len(dataset) // total_slots + 1
+            difficulty = difficulties[len(dataset) % len(difficulties)]
+            question, answer = self.writer.generate_qa(
+                topic=section,
+                bullets=[bullet],
+                difficulty=difficulty,
+                variant=variant,
+            )
+            score, review = self.reviewer.review(question, answer)
+            dataset.append(
+                QAItem(
+                    id=len(dataset) + 1,
+                    topic=section,
+                    difficulty=difficulty,
+                    input=question,
+                    output=answer,
+                    teaching_note=note,
+                    review=review,
+                    score=score,
                 )
-                score, review = self.reviewer.review(question, answer)
-                dataset.append(
-                    QAItem(
-                        id=idx,
-                        topic=node.section,
-                        difficulty=difficulties[(idx - 1) % len(difficulties)],
-                        input=question,
-                        output=answer,
-                        teaching_note=note,
-                        review=review,
-                        score=score,
-                    )
-                )
-                idx += 1
-            if idx > num_questions:
-                break
+            )
+
+            elapsed = time.perf_counter() - start_ts
+            done = len(dataset)
+            avg = elapsed / done
+            eta = max(num_questions - done, 0) * avg
+            emit(
+                "sample",
+                completed=done,
+                total=num_questions,
+                section=section,
+                variant=variant,
+                difficulty=difficulty,
+                elapsed_seconds=elapsed,
+                eta_seconds=eta,
+            )
         return dataset
 
     @staticmethod

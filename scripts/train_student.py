@@ -7,6 +7,7 @@ from peft import LoraConfig, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    DataCollatorForLanguageModeling,
     Trainer,
     TrainingArguments,
 )
@@ -27,7 +28,12 @@ def preprocess_function(tokenizer, max_length: int):
     def _inner(example: Dict[str, str]):
         prompt = f"用户问题：{example['input']}\n请像 CPA 老师一样回答："
         text = prompt + example["output"]
-        tokens = tokenizer(text, truncation=True, max_length=max_length)
+        tokens = tokenizer(
+            text,
+            truncation=True,
+            max_length=max_length,
+        )
+        tokens["labels"] = tokens["input_ids"].copy()
         return tokens
 
     return _inner
@@ -36,7 +42,10 @@ def preprocess_function(tokenizer, max_length: int):
 def train(args: argparse.Namespace) -> None:
     dataset = load_dataset("json", data_files=str(args.data))
     tokenizer = AutoTokenizer.from_pretrained(args.model)
+    if tokenizer.pad_token is None and tokenizer.eos_token:
+        tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(args.model)
+    model.config.pad_token_id = tokenizer.pad_token_id
 
     peft_config = LoraConfig(
         r=8,
@@ -63,6 +72,10 @@ def train(args: argparse.Namespace) -> None:
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset["train"],
+        data_collator=DataCollatorForLanguageModeling(
+            tokenizer=tokenizer,
+            mlm=False,
+        ),
     )
     trainer.train()
 
