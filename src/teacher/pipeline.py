@@ -25,7 +25,12 @@ def parse_args() -> argparse.Namespace:
         description="Generate CPA multi-agent Q&A dataset using DeepSeek via LangChain",
     )
     parser.add_argument("--topic", required=True, help="CPA subject, e.g., 财务成本管理")
-    parser.add_argument("--num-questions", type=int, default=5, help="Number of QA pairs")
+    parser.add_argument(
+        "--num-questions",
+        type=int,
+        default=200,
+        help="Number of QA pairs (large outlines will be cycled to reach目标数量)",
+    )
     parser.add_argument(
         "--output",
         type=Path,
