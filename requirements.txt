@@ -1,0 +1,13 @@
+langchain>=0.2.0
+langchain-openai>=0.1.8
+openai>=1.13.3
+python-dotenv>=1.0.1
+pydantic>=2.5.0
+datasets>=2.18.0
+transformers>=4.39.0
+peft>=0.10.0
+accelerate>=0.28.0
+streamlit>=1.32.0
+evaluate>=0.4.1
+sacrebleu>=2.4.0
+bert-score>=0.3.13
