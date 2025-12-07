@@ -14,7 +14,6 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
 def _build_client(temperature: float = 0.2) -> Optional[ChatOpenAI]:
     """Instantiate a ChatOpenAI client if credentials are available."""
-
     if not DEEPSEEK_API_KEY or not DEEPSEEK_API_BASE:
         return None
     return ChatOpenAI(
@@ -27,8 +26,7 @@ def _build_client(temperature: float = 0.2) -> Optional[ChatOpenAI]:
 
 def _fallback_response(prompt: str, tag: str) -> str:
     """Offline-safe fallback message used when API credentials are missing."""
-
-    return f"[{tag}] {prompt[:120]} ... (请配置 DEEPSEEK_API_KEY 与 DEEPSEEK_API_BASE 以获得真实生成内容)"
+    return f"[{tag}] {prompt[:120]} ... (请配置 DEEPSEEK_API_KEY 和 DEEPSEEK_API_BASE 以获得真实生成内容)"
 
 
 @dataclass
@@ -58,12 +56,9 @@ class PlannerAgent:
             [
                 (
                     "system",
-                    "你是注册会计师课程的教案设计师，请输出分节大纲，每节附 2-4 个要点。",
+                    "你是注册会计师课程的教案设计师，请输出章节大纲，每节给出 2-4 个要点，使用 JSON 数组，每项含 section 和 bullet_points。",
                 ),
-                (
-                    "human",
-                    "科目: {topic}\n请以 JSON 数组输出，字段 section 与 bullet_points",
-                ),
+                ("human", "科目: {topic}"),
             ]
         )
 
@@ -90,11 +85,11 @@ class WriterAgent:
             [
                 (
                     "system",
-                    "你是 CPA 讲解老师，根据大纲要点生成问答题（中文），并附标准答案，确保不同变体的提问方式各有侧重。",
+                    "你是 CPA 讲解老师，输出简短单轮 QA：\n- 题型：填空/计算/简答，题干<=30字，答案<=40字，可含1条公式或1-2步计算；\n- 只出一问一答，不要解析/点评/多问多答；\n- 题干紧扣给定要点，不扩展新话题；\n- 输出格式严格为：问题：...\\n答案：...",
                 ),
                 (
                     "human",
-                    "科目: {topic}\n要点: {bullets}\n难度: {difficulty}\n变体序号: {variant}\n请输出问题和标准答案，避免与同主题已有题目重复。",
+                    "科目: {topic}\n要点: {bullets}\n难度: {difficulty}\n变体序号: {variant}",
                 ),
             ]
         )
@@ -102,11 +97,11 @@ class WriterAgent:
             [
                 (
                     "system",
-                    "为 CPA 知识点写简短 teaching_note，便于学生快速理解。",
+                    "用 80-120 字写 CPA 知识点讲解，突出公式/定义，避免冗长案例。",
                 ),
                 (
                     "human",
-                    "标题: {heading}\n要点: {bullets}\n请输出 80-120 字讲解。",
+                    "标题: {heading}\n要点: {bullets}\n请输出讲解。",
                 ),
             ]
         )
@@ -114,7 +109,7 @@ class WriterAgent:
             [
                 (
                     "system",
-                    "你是 CPA 教学专家，直接回答学生的提问，保持简洁有条理。",
+                    "你是 CPA 教学专家，回答要简短、有条理，避免长段落。",
                 ),
                 ("human", "问题: {question}"),
             ]
@@ -139,7 +134,9 @@ class WriterAgent:
             placeholder = _fallback_response(rendered, "QA")
             return placeholder, placeholder
         reply = self.client.invoke(rendered).content.strip()
-        # simple split heuristic
+        if "答案：" in reply:
+            parts = reply.split("答案：", maxsplit=1)
+            return parts[0].replace("问题：", "").strip(), parts[1].strip()
         if "答：" in reply:
             parts = reply.split("答：", maxsplit=1)
             return parts[0].replace("问：", "").strip(), parts[1].strip()
@@ -161,11 +158,11 @@ class ReviewerAgent:
             [
                 (
                     "system",
-                    "你是注册会计师出题专家，请对以下问答进行评分与点评，满分 10 分。",
+                    "你是注册会计师出题质检专家，只返回 JSON，不要代码块，不要多余文字。键：score(0-10), review(20字内指出是否贴合要点、是否简洁)。",
                 ),
                 (
                     "human",
-                    "问题: {question}\n答案: {answer}\n请输出 JSON，包含 score 与 review。",
+                    "问题: {question}\n答案: {answer}\n请直接输出 JSON，例如 {{\"score\": 8.5, \"review\": \"答案简短但缺少公式\"}}",
                 ),
             ]
         )
@@ -175,8 +172,13 @@ class ReviewerAgent:
         if not self.client:
             return 5.0, _fallback_response(rendered, "Review")
         content = self.client.invoke(rendered).content.strip()
+        cleaned = content.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`").strip()
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].strip()
         try:
-            data = json.loads(content)
+            data = json.loads(cleaned)
             return float(data.get("score", 0)), data.get("review", "")
         except Exception:
             return 0.0, content
@@ -195,29 +197,34 @@ class DatasetSynthesizer:
         topic: str,
         num_questions: int = 5,
         difficulties: Sequence[str] | None = None,
+        min_score: float | None = None,
+        max_attempts: int | None = None,
+        use_outline: bool = False,
+        flush_every: int | None = None,
+        flush_callback: Optional[callable] = None,
+        start_id: int = 1,
     ) -> List[QAItem]:
-        outline = self.planner.plan(topic)
+        outline = self.planner.plan(topic) if use_outline else [OutlineNode(section=topic, bullet_points=[topic])]
         difficulties = list(difficulties or ["easy", "medium", "hard"])
+        attempt_cap = max_attempts or num_questions * 5
 
-        # Gather all outline bullets to allow round-robin generation even if
-        # the outline is short, preventing early termination when num_questions
-        # is large (e.g., 200+).
-        expanded_outline: list[tuple[str, str, str]] = []  # (section, note, bullet)
+        expanded_outline: list[tuple[str, str, str]] = []
         for node in outline:
             bullets = node.bullet_points or [node.section]
-            note = self.writer.generate_note(node.section, bullets)
+            # 跳过讲义生成以加速；教学笔记留空字符串
+            note = "" if not use_outline else self.writer.generate_note(node.section, bullets)
             for bullet in bullets:
                 expanded_outline.append((node.section, note, bullet))
 
-        if not expanded_outline:
-            expanded_outline.append((topic, self.writer.generate_note(topic, [topic]), topic))
-
         dataset: list[QAItem] = []
+        seen_inputs: set[str] = set()
+        chunk_buffer: list[QAItem] = []
+        attempts = 0
         total_slots = len(expanded_outline)
-        while len(dataset) < num_questions:
-            section, note, bullet = expanded_outline[len(dataset) % total_slots]
-            variant = len(dataset) // total_slots + 1
-            difficulty = difficulties[len(dataset) % len(difficulties)]
+        while len(dataset) < num_questions and attempts < attempt_cap:
+            section, note, bullet = expanded_outline[attempts % total_slots]
+            variant = attempts // total_slots + 1
+            difficulty = difficulties[attempts % len(difficulties)]
             question, answer = self.writer.generate_qa(
                 topic=section,
                 bullets=[bullet],
@@ -225,18 +232,31 @@ class DatasetSynthesizer:
                 variant=variant,
             )
             score, review = self.reviewer.review(question, answer)
-            dataset.append(
-                QAItem(
-                    id=len(dataset) + 1,
-                    topic=section,
-                    difficulty=difficulty,
-                    input=question,
-                    output=answer,
-                    teaching_note=note,
-                    review=review,
-                    score=score,
-                )
+            attempts += 1
+            if min_score is not None and score < min_score:
+                continue
+            if question in seen_inputs:
+                continue
+            seen_inputs.add(question)
+            item = QAItem(
+                id=start_id + len(dataset),
+                topic=section,
+                difficulty=difficulty,
+                input=question,
+                output=answer,
+                teaching_note=note,
+                review=review,
+                score=score,
             )
+            dataset.append(item)
+            chunk_buffer.append(item)
+            if flush_every and flush_callback and len(chunk_buffer) >= flush_every:
+                flush_callback(chunk_buffer)
+                chunk_buffer = []
+
+        if chunk_buffer and flush_callback:
+            flush_callback(chunk_buffer)
+
         return dataset
 
     @staticmethod

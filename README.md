@@ -7,10 +7,11 @@ This project sketches a lightweight multi-agent pipeline for generating CPA exam
 - `src/teacher/` – Planner, Writer, Reviewer agents and orchestration helpers for dataset synthesis.
 - `src/student/` – Student model fine-tuning utilities and inference helpers.
 - `src/eval/` – Automatic metrics and experiment scaffolding.
+- `scripts/` – CLI helpers for dataset synthesis, fine-tuning, and evaluation.
 - `app.py` – Streamlit UI for comparing Teacher vs Student answers.
 - `data/sample_teacher_dataset.json` – Small CPA-style QA sample for quick testing.
 
-## Quickstart
+## Quickstart: run end-to-end
 
 1. Install dependencies (Python 3.10+ recommended):
 
@@ -22,22 +23,38 @@ This project sketches a lightweight multi-agent pipeline for generating CPA exam
 
    ```bash
    export DEEPSEEK_API_BASE="https://api.deepseek.com"
-   export DEEPSEEK_API_KEY="sk-..."
+   export DEEPSEEK_API_KEY="sk-xxxxxxxx"
    ```
 
-3. Run a small synthetic generation job to produce a dataset under `data/`:
+3. 合成并“蒸馏”高质量教师数据（评分过滤，默认阈值 7 分）到 JSONL：
 
    ```bash
-   python -m src.teacher.pipeline --topic "财务成本管理" --num-questions 10
+   python scripts/generate_dataset.py --topic "财务成本管理" --num-questions 500 --min-score 7.5 --jsonl
+   # 输出示例：data/generated/财务成本管理_teacher_500.jsonl
    ```
 
-4. Fine-tune the student model with LoRA (example uses Qwen1.5-1.8B-Chat):
+4. 使用 LoRA/QLoRA 微调小模型（自动切分验证集）：
 
    ```bash
-   python scripts/train_student.py --data data/sample_teacher_dataset.json --model Qwen1.5-1.8B-Chat
+   python scripts/train_student.py \
+     --data data/generated/财务成本管理_teacher_500.jsonl \
+     --model Qwen1.5-1.8B-Chat \
+     --output-dir outputs/student_lora \
+     --qlora \
+     --epochs 3 --batch-size 2 --gradient-accumulation-steps 4
    ```
 
-5. Launch the demo UI to compare Teacher and Student answers:
+5. 生成学生答案并对比教师参考，输出指标：
+
+   ```bash
+   python scripts/eval_student.py \
+     --teacher data/generated/财务成本管理_teacher_500.jsonl \
+     --model Qwen1.5-1.8B-Chat \
+     --lora outputs/student_lora \
+     --limit 200
+   ```
+
+6. 打开可视化对比界面（无需改动当前架构）：
 
    ```bash
    streamlit run app.py
@@ -45,6 +62,7 @@ This project sketches a lightweight multi-agent pipeline for generating CPA exam
 
 ## Notes
 
-- The teacher side relies on LangChain; replace the DeepSeek chat wrapper with any compatible OpenAI-style backend.
-- The sample dataset is tiny and only for smoke tests; for real experiments, enlarge via the pipeline and add held-out evaluation splits.
-- Evaluation scaffolding provides BLEU/BERTScore hooks and human-rating placeholders; plug in your metrics of choice.
+- Teacher 侧使用 LangChain + DeepSeek API，可替换为任意兼容 OpenAI 的后端。
+- `scripts/generate_dataset.py` 会自动丢弃评分低于阈值的 QA，确保蒸馏后训练集质量。
+- 训练脚本支持 JSON/JSONL 数据、验证切分和 QLoRA，低显存也可跑通。
+- `scripts/eval_student.py` 会生成学生预测、对齐教师参考并计算 BLEU/BERTScore，便于快速评估。

@@ -7,7 +7,10 @@ import evaluate
 
 
 def load_json(path: Path) -> List[dict]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    if text.lstrip().startswith("["):
+        return json.loads(text)
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
 def compute_metrics(references: Iterable[str], predictions: Iterable[str]) -> dict:

@@ -56,7 +56,7 @@ with st.sidebar:
     st.header("模型配置")
     deepseek_ready = bool(os.getenv("DEEPSEEK_API_KEY") and os.getenv("DEEPSEEK_API_BASE"))
     st.write("✅ Teacher API 已配置" if deepseek_ready else "⚠️ Teacher API 未配置，使用占位输出")
-    student_base = st.text_input("Student 基座模型", value="Qwen1.5-1.8B-Chat")
+    student_base = st.text_input("Student 基座模型", value="qwen/Qwen3-0.6B")
     lora_path = st.text_input("LoRA 权重路径", value="outputs/student_lora")
     st.divider()
     st.caption("提示：可在主界面使用批量合成获得 200+ 条训练样本")
